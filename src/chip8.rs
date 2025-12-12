@@ -4,6 +4,9 @@ use std::time::{Duration, Instant};
 pub const MEM_SIZE: usize = 4096;
 pub const SCREEN_W: usize = 64;
 pub const SCREEN_H: usize = 32;
+pub const TOKEN_LEN: usize = 32;
+pub const NOTE_BASE: usize = 0xC00;
+pub const TOKEN_BASE: usize = 0xE00;
 
 const FONT_BASE: usize = 0x50;
 const PROGRAM_START: u16 = 0x200;
@@ -12,6 +15,19 @@ const PROGRAM_START: u16 = 0x200;
 pub struct StepResult {
     pub draw: bool,
     pub waiting_for_key: bool,
+}
+
+#[derive(Debug)]
+pub enum OpcodeDispatch {
+    TokenStore,
+    PutToken,
+    GetToken,
+    SetKeyPayload,
+    LoadRomPayload,
+    ResetVm,
+    Frame { frame: String },
+    LeakNote { byte: u8 },
+    Standard(StepResult),
 }
 
 pub struct Chip8 {
@@ -96,6 +112,47 @@ impl Chip8 {
             out.push('\n');
         }
         out
+    }
+
+    pub fn set_token_bytes(&mut self, token: &[u8]) {
+        let end = (TOKEN_BASE + token.len()).min(MEM_SIZE);
+        let slice_len = end.saturating_sub(TOKEN_BASE);
+        self.mem[TOKEN_BASE..TOKEN_BASE + slice_len].fill(0);
+        self.mem[TOKEN_BASE..TOKEN_BASE + slice_len].copy_from_slice(&token[..slice_len]);
+    }
+
+    pub fn read_note_byte(&self, opcode: u16) -> u8 {
+        let x = ((opcode & 0x0F00) >> 8) as usize;
+        let offset = self.i as usize + self.v[x] as usize;
+        let addr = NOTE_BASE + offset;
+        if addr < MEM_SIZE { self.mem[addr] } else { 0 }
+    }
+
+    pub fn dispatch_opcode(&mut self, opcode: u16) -> OpcodeDispatch {
+        match opcode {
+            0xFCCC => OpcodeDispatch::TokenStore,
+            0xF001 => OpcodeDispatch::PutToken,
+            0xF002 => OpcodeDispatch::GetToken,
+            0xF003 => OpcodeDispatch::SetKeyPayload,
+            0xF010 => OpcodeDispatch::LoadRomPayload,
+            0xF011 => {
+                self.reset();
+                OpcodeDispatch::ResetVm
+            }
+            0xF0FF => OpcodeDispatch::Frame {
+                frame: self.render_ansi(),
+            },
+            opcode if opcode & 0xF0FF == 0xF0DD => OpcodeDispatch::LeakNote {
+                byte: self.read_note_byte(opcode),
+            },
+            _ => OpcodeDispatch::Standard(self.step(opcode)),
+        }
+    }
+
+    pub fn apply_set_key_payload(&mut self, payload: [u8; 2]) {
+        let key = (payload[0] & 0x0F) as usize;
+        let down = payload[1] != 0;
+        self.set_key(key, down);
     }
 
     pub fn step(&mut self, opcode: u16) -> StepResult {
