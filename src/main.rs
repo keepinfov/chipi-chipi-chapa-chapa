@@ -5,6 +5,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    signal,
     sync::Mutex,
 };
 
@@ -96,14 +97,30 @@ async fn main() -> std::io::Result<()> {
     let state = Arc::new(state);
 
     loop {
-        let (sock, peer) = listener.accept().await?;
-        let st = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(sock, peer, st).await {
-                eprintln!("[{peer}] connection ended: {e}");
+        tokio::select! {
+            res = listener.accept() => {
+                match res {
+                    Ok((sock, peer)) => {
+                        let st = state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_client(sock, peer, st).await {
+                                eprintln!("[{peer}] connection ended: {e}");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!("accept failed: {err}");
+                    }
+                }
             }
-        });
+            _ = signal::ctrl_c() => {
+                eprintln!("received shutdown signal, exiting");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
 
 async fn handle_client(
